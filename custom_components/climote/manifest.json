@@ -1,0 +1,12 @@
+{
+  "domain": "climote",
+  "name": "Climote Heating",
+  "codeowners": ["@sunnyuff"],
+  "config_flow": true,
+  "documentation": "https://github.com/sunnyuff/ha-climote",
+  "homeassistant": "2023.1.0",
+  "iot_class": "cloud_polling",
+  "version": "1.0.0",
+  "requirements": ["xmltodict>=0.13.0"]
+}
+

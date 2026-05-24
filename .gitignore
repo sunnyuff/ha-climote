@@ -1,0 +1,54 @@
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual Environments ──────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Testing ───────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+*.coveragerc
+.tox/
+
+# ── Secrets & Credentials (NEVER commit these) ────────────
+.env
+.env.*
+*.env
+secrets.yaml
+secrets.yml
+config/secrets.yaml
+
+# Test credential files — run with env vars instead:
+#   CLIMOTE_EMAIL="..." CLIMOTE_DEVICE_ID="..." python3 tests/live_test.py
+tests/credentials.py
+tests/secrets.py
+tests/.env
+
+# ── Home Assistant local config (if testing locally) ──────
+config/
+.storage/
+home-assistant_v2.db
+home-assistant.log
+
+# ── IDE & OS ──────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────────
+*.log

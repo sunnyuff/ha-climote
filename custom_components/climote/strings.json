@@ -1,0 +1,46 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure Climote Heating",
+        "description": "Enter your Climote portal credentials. Your **Climote Device No.** is the number printed on your Climote hub (e.g. `1234567890`). You can also find it on the [Climote portal login page](https://climote.climote.ie/manager/login).",
+        "data": {
+          "email": "Email Address",
+          "device_id": "Climote Device No.",
+          "pin": "Security PIN (Optional)"
+        },
+        "data_description": {
+          "email": "The email address used to log in to the Climote portal.",
+          "device_id": "Your 10-digit Climote Device Number printed on the hub or shown at login.",
+          "pin": "Only required if your account has a Security PIN enabled."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Climote servers. Check your internet connection.",
+      "invalid_auth": "Invalid email address or Climote Device No. Please check your credentials.",
+      "unknown": "Unexpected error occurred. Check Home Assistant logs for details."
+    },
+    "abort": {
+      "already_configured": "This Climote Device is already configured.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Climote Options",
+        "description": "Adjust polling and boost settings. **Minimum poll interval is 1800 seconds (30 minutes)** to avoid exceeding GSM SMS limits.",
+        "data": {
+          "poll_interval": "Polling Interval (seconds)",
+          "boost_duration": "Default Boost Duration (hours)"
+        },
+        "data_description": {
+          "poll_interval": "How often to fetch status from the cloud cache. Minimum 1800s (30 min).",
+          "boost_duration": "Duration in hours when Boost is triggered (0.5 = 30 min, 1 = 1 hour, etc.)."
+        }
+      }
+    }
+  }
+}
+
