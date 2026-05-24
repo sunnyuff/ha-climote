@@ -68,10 +68,13 @@ class ClimoteZoneBoostSwitch(CoordinatorEntity[ClimoteDataUpdateCoordinator], Sw
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the boost switch."""
-        duration = self.entry.options.get(
-            CONF_BOOST_DURATION,
-            self.entry.data.get(CONF_BOOST_DURATION, DEFAULT_BOOST_DURATION)
-        )
+        # Read duration from the select entity state stored in hass.data
+        durations = self.hass.data[DOMAIN][self.entry.entry_id].get("boost_durations", {})
+        duration_label = durations.get(self._zone_id, "1 hour")
+        
+        # Map back to hours
+        from .select import BOOST_OPTIONS_MAP
+        duration = BOOST_OPTIONS_MAP.get(duration_label, 1.0)
         LOGGER.info("Turning ON Boost Switch for zone %d (duration %s hours)", self._zone_id, duration)
         
         success = await self.coordinator.api.set_boost(self._zone_id, float(duration))
