@@ -37,7 +37,7 @@
         },
         "data_description": {
           "poll_interval": "How often to fetch status from the cloud cache. Minimum 1800s (30 min).",
-          "boost_duration": "Duration in hours when Boost is triggered (0.5 = 30 min, 1 = 1 hour, etc.)."
+          "boost_duration": "Select how long to boost when triggered (in 15-minute intervals)."
         }
       }
     }

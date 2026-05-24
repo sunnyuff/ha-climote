@@ -10,6 +10,9 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectOptionDict,
 )
 import homeassistant.helpers.config_validation as cv
 
@@ -27,6 +30,20 @@ from .const import (
 )
 from .api import ClimoteAPI, ClimoteAuthError, ClimoteConnectionError
 
+# Boost duration presets — 15-minute intervals, value stored as decimal hours
+BOOST_DURATION_OPTIONS = [
+    SelectOptionDict(value="0.5",  label="30 minutes"),
+    SelectOptionDict(value="0.75", label="45 minutes"),
+    SelectOptionDict(value="1.0",  label="1 hour"),
+    SelectOptionDict(value="1.25", label="1 hour 15 minutes"),
+    SelectOptionDict(value="1.5",  label="1 hour 30 minutes"),
+    SelectOptionDict(value="1.75", label="1 hour 45 minutes"),
+    SelectOptionDict(value="2.0",  label="2 hours"),
+    SelectOptionDict(value="3.0",  label="3 hours"),
+    SelectOptionDict(value="4.0",  label="4 hours"),
+    SelectOptionDict(value="6.0",  label="6 hours"),
+    SelectOptionDict(value="8.0",  label="8 hours"),
+]
 
 class ClimoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climote Heating.
@@ -184,13 +201,10 @@ class ClimoteOptionsFlowHandler(config_entries.OptionsFlow):
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
-                    vol.Optional(CONF_BOOST_DURATION, default=float(boost_duration)): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0.5,
-                            max=8.0,
-                            step=0.5,
-                            unit_of_measurement="hours",
-                            mode=NumberSelectorMode.SLIDER,
+                    vol.Optional(CONF_BOOST_DURATION, default=str(float(boost_duration))): SelectSelector(
+                        SelectSelectorConfig(
+                            options=BOOST_DURATION_OPTIONS,
+                            mode="list",
                         )
                     ),
                 }
