@@ -6,7 +6,7 @@
   "documentation": "https://github.com/sunnyuff/ha-climote",
   "homeassistant": "2023.1.0",
   "iot_class": "cloud_polling",
-  "version": "1.1.0",
+  "version": "1.2.2",
   "requirements": ["xmltodict>=0.13.0"]
 }
 
