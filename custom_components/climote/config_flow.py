@@ -32,6 +32,7 @@ from .api import ClimoteAPI, ClimoteAuthError, ClimoteConnectionError
 
 # Boost duration presets — 15-minute intervals, value stored as decimal hours
 BOOST_DURATION_OPTIONS = [
+    SelectOptionDict(value="0.25", label="15 minutes"),
     SelectOptionDict(value="0.5",  label="30 minutes"),
     SelectOptionDict(value="0.75", label="45 minutes"),
     SelectOptionDict(value="1.0",  label="1 hour"),
