@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Configure Climote Heating",
-        "description": "Enter your Climote portal credentials. Your **Climote Device No.** is the number printed on your Climote hub (e.g. `1234567890`). You can also find it on the [Climote portal login page](https://climote.climote.ie/manager/login).",
+        "description": "Enter your Climote portal credentials. Your **Climote Device No.** is the number printed on your Climote hub (e.g. `1234567890`).",
         "data": {
           "email": "Email Address",
           "device_id": "Climote Device No.",
