@@ -5,9 +5,8 @@
   "config_flow": true,
   "documentation": "https://github.com/sunnyuff/ha-climote",
   "issue_tracker": "https://github.com/sunnyuff/ha-climote/issues",
-  "min_homeassistant": "2023.1.0",
   "iot_class": "cloud_polling",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "requirements": ["xmltodict>=0.13.0"]
 }
 
