@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, LOGGER, CONF_BOOST_DURATION, DEFAULT_BOOST_DURATION
+from .const import DOMAIN, LOGGER, DEFAULT_BOOST_DURATION
 from .coordinator import ClimoteDataUpdateCoordinator
 
 async def async_setup_entry(
@@ -73,7 +73,8 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
         """Return the target temperature (thermostat setting)."""
         try:
             thermostat = self._zone_data.get("thermostat")
-            if thermostat is not None:
+            # Zones without a physical sensor report "00" or 0 — treat as unknown
+            if thermostat is not None and float(thermostat) > 0:
                 return float(thermostat)
         except (ValueError, TypeError):
             pass
@@ -131,23 +132,23 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
         """Return the target temperature step."""
         return 0.5
 
+    def _get_zone_boost_duration(self) -> float:
+        """Read the per-zone boost duration from the shared number entity store."""
+        durations = self.hass.data[DOMAIN][self.entry.entry_id].get("boost_durations", {})
+        return float(durations.get(self._zone_id, DEFAULT_BOOST_DURATION))
+
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set HVAC mode. Setting HEAT triggers boost, OFF stops boost."""
         if hvac_mode == HVACMode.HEAT:
-            duration = self.entry.options.get(
-                CONF_BOOST_DURATION,
-                self.entry.data.get(CONF_BOOST_DURATION, DEFAULT_BOOST_DURATION)
-            )
-            LOGGER.info("Setting HVAC Mode to HEAT for zone %d (toggling %s hours boost)", self._zone_id, duration)
-            success = await self.coordinator.api.set_boost(self._zone_id, float(duration))
+            duration = self._get_zone_boost_duration()
+            LOGGER.info("Setting HVAC Mode to HEAT for zone %d (boosting %s hours)", self._zone_id, duration)
+            success = await self.coordinator.api.set_boost(self._zone_id, duration)
             if success:
-                # Force GSM refresh to get the updated status and time remaining immediately
                 await self.coordinator.async_force_gsm_refresh()
         elif hvac_mode == HVACMode.OFF:
             LOGGER.info("Setting HVAC Mode to OFF for zone %d (cancelling boost)", self._zone_id)
             success = await self.coordinator.api.cancel_boost(self._zone_id)
             if success:
-                # Force GSM refresh to get the updated status immediately
                 await self.coordinator.async_force_gsm_refresh()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
@@ -161,10 +162,7 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
             "Triggering a temporary Boost instead to heat zone %d to target.",
             self._zone_id
         )
-        duration = self.entry.options.get(
-            CONF_BOOST_DURATION,
-            self.entry.data.get(CONF_BOOST_DURATION, DEFAULT_BOOST_DURATION)
-        )
-        success = await self.coordinator.api.set_boost(self._zone_id, float(duration))
+        duration = self._get_zone_boost_duration()
+        success = await self.coordinator.api.set_boost(self._zone_id, duration)
         if success:
             await self.coordinator.async_force_gsm_refresh()

@@ -17,7 +17,7 @@ from .const import (
 from .api import ClimoteAPI
 from .coordinator import ClimoteDataUpdateCoordinator
 
-PLATFORMS = [Platform.CLIMATE, Platform.SWITCH, Platform.SENSOR, Platform.SELECT]
+PLATFORMS = [Platform.CLIMATE, Platform.SWITCH, Platform.SENSOR, Platform.NUMBER]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Climote Heating from a config entry."""
