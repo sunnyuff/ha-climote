@@ -233,15 +233,34 @@ class ClimoteAPI:
         return self.zone_labels
 
     async def get_status(self, force_gsm: bool = False) -> dict:
-        """Fetch zone status. If force_gsm is True, poll waiting-get-status-response."""
+        """Fetch zone status with automatic session recovery.
+
+        If the first attempt fails (e.g. expired session returns an empty body),
+        the session is invalidated, a fresh login is performed, and the request
+        is retried once.  This prevents the integration from becoming permanently
+        stuck after a session timeout.
+        """
         LOGGER.debug("Fetching Climote status (force_gsm=%s)", force_gsm)
-        
+
         # Ensure we are logged in by checking CSRF token
         if not self._csrf_token:
             LOGGER.debug("Not logged in. Performing login prior to get_status.")
             await self.login()
 
-        # Step A: Status Trigger Request
+        try:
+            return await self._fetch_status(force_gsm)
+        except ClimoteConnectionError:
+            # Session likely expired — force re-login and retry once
+            LOGGER.info(
+                "Climote status fetch failed — session may have expired. "
+                "Re-authenticating and retrying…"
+            )
+            self._csrf_token = None
+            await self.login()
+            return await self._fetch_status(force_gsm)
+
+    async def _fetch_status(self, force_gsm: bool = False) -> dict:
+        """Internal: fetch zone status (single attempt, no retry)."""
         force_val = "1" if force_gsm else "0"
         try:
             status_res = await self._request(
@@ -249,9 +268,16 @@ class ClimoteAPI:
                 PATH_STATUS,
                 params={"force": force_val}
             )
-            
+
             # get-status returns an escaped JSON string inside a string. Parse twice.
             clean_res = status_res.strip()
+
+            # Empty body is a strong signal of session expiry
+            if not clean_res:
+                raise ClimoteConnectionError(
+                    "Empty response from Climote API — session likely expired"
+                )
+
             if clean_res.startswith('"') and clean_res.endswith('"'):
                 try:
                     parsed_str = json.loads(clean_res)
@@ -264,6 +290,8 @@ class ClimoteAPI:
                     status_data = clean_res
             else:
                 status_data = json.loads(clean_res)
+        except ClimoteConnectionError:
+            raise
         except Exception as err:
             LOGGER.error("Failed to parse status response: %s", err)
             raise ClimoteConnectionError("Status retrieval parse failure") from err
@@ -306,10 +334,32 @@ class ClimoteAPI:
         # Fallback: get cached status without forcing GSM
         return await self.get_status(force_gsm=False)
 
+    async def _send_boost_payload(self, payload: dict) -> None:
+        """Internal: POST a boost payload, retrying once after re-auth on failure."""
+        try:
+            await self._request(
+                "POST",
+                PATH_BOOST,
+                data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+        except ClimoteConnectionError:
+            # Session may have expired — re-login and rebuild CSRF in payload
+            LOGGER.info("Boost POST failed — re-authenticating and retrying…")
+            self._csrf_token = None
+            await self.login()
+            payload["cs_token_rf"] = self._csrf_token
+            await self._request(
+                "POST",
+                PATH_BOOST,
+                data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+
     async def set_boost(self, zone_id: int, duration_hours: float) -> bool:
         """Trigger boost for a specific zone and wait for delivery confirmation."""
         LOGGER.info("Boosting zone %d for %s hours", zone_id, duration_hours)
-        
+
         if not self._csrf_token:
             await self.login()
 
@@ -320,14 +370,8 @@ class ClimoteAPI:
         }
         payload["cs_token_rf"] = self._csrf_token
 
-        # Send command
         try:
-            await self._request(
-                "POST",
-                PATH_BOOST,
-                data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
+            await self._send_boost_payload(payload)
         except Exception as err:
             LOGGER.error("Failed to POST boost command: %s", err)
             return False
@@ -338,7 +382,7 @@ class ClimoteAPI:
     async def cancel_boost(self, zone_id: int) -> bool:
         """Send stop boost command for a specific zone."""
         LOGGER.info("Cancelling boost for zone %d", zone_id)
-        
+
         if not self._csrf_token:
             await self.login()
 
@@ -349,14 +393,8 @@ class ClimoteAPI:
         }
         payload["cs_token_rf"] = self._csrf_token
 
-        # Send command
         try:
-            await self._request(
-                "POST",
-                PATH_BOOST,
-                data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
+            await self._send_boost_payload(payload)
         except Exception as err:
             LOGGER.error("Failed to POST stop boost command: %s", err)
             return False
