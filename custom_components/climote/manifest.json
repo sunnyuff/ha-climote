@@ -4,9 +4,8 @@
   "codeowners": ["@sunnyuff"],
   "config_flow": true,
   "documentation": "https://github.com/sunnyuff/ha-climote",
-  "issue_tracker": "https://github.com/sunnyuff/ha-climote/issues",
   "iot_class": "cloud_polling",
-  "version": "1.2.4",
-  "requirements": ["xmltodict>=0.13.0"]
+  "issue_tracker": "https://github.com/sunnyuff/ha-climote/issues",
+  "requirements": ["xmltodict>=0.13.0"],
+  "version": "1.2.5"
 }
-
