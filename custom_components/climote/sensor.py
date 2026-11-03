@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .api import boost_minutes
 from .const import DOMAIN, LOGGER
 from .coordinator import ClimoteDataUpdateCoordinator
 
@@ -50,7 +51,7 @@ class ClimoteSensorBase(CoordinatorEntity[ClimoteDataUpdateCoordinator], SensorE
 
         self._attr_device_info = {
             "identifiers": {(DOMAIN, self.email)},
-            "name": f"Climote Heating ({entry.title})",
+            "name": "Climote",
             "manufacturer": "Climote",
             "model": "Climote GSM Hub",
         }
@@ -112,14 +113,8 @@ class ClimoteBoostTimeRemainingSensor(ClimoteSensorBase):
     @property
     def native_value(self) -> int | None:
         """Return the remaining boost minutes."""
-        try:
-            time_rem = self._zone_data.get("timeRemaining")
-            if time_rem is not None:
-                return int(time_rem)
-        except (ValueError, TypeError):
-            pass
-        # Return 0 if not boosted
-        return 0
+        # Climote reports the minutes left in the zone's "boost" field ("00" when not boosting)
+        return boost_minutes(self._zone_data)
 
 
 class ClimoteLastUpdatedSensor(CoordinatorEntity[ClimoteDataUpdateCoordinator], SensorEntity):
@@ -145,7 +140,7 @@ class ClimoteLastUpdatedSensor(CoordinatorEntity[ClimoteDataUpdateCoordinator], 
 
         self._attr_device_info = {
             "identifiers": {(DOMAIN, email)},
-            "name": f"Climote Heating ({entry.title})",
+            "name": "Climote",
             "manufacturer": "Climote",
             "model": "Climote GSM Hub",
         }
@@ -154,5 +149,5 @@ class ClimoteLastUpdatedSensor(CoordinatorEntity[ClimoteDataUpdateCoordinator], 
     def native_value(self) -> datetime | None:
         """Return the timestamp of the last successful coordinator update."""
         if self.coordinator.last_update_success:
-            return self.coordinator.last_update_success_time
+            return self.coordinator.last_success_time
         return None
