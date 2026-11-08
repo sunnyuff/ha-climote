@@ -9,10 +9,12 @@ from homeassistant.components.climate import (
 from homeassistant.const import UnitOfTemperature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, LOGGER, DEFAULT_BOOST_DURATION
+from .api import temp_limits
 from .coordinator import ClimoteDataUpdateCoordinator
 
 async def async_setup_entry(
@@ -120,12 +122,12 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
     @property
     def min_temp(self) -> float:
         """Return the minimum temperature."""
-        return 5.0
+        return temp_limits(self._zone_id)[0]
 
     @property
     def max_temp(self) -> float:
         """Return the maximum temperature."""
-        return 32.0
+        return temp_limits(self._zone_id)[1]
 
     @property
     def target_temperature_step(self) -> float:
@@ -152,17 +154,28 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
                 await self.coordinator.async_force_gsm_refresh()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set target temperature. Climote schedules are template-based, so setting temperature triggers a boost."""
+        """Set the zone's target temperature through the portal's temperature form."""
         temperature = kwargs.get("temperature")
         if temperature is None:
             return
 
-        LOGGER.warning(
-            "Setting arbitrary target temperature directly on Climote is template-bound. "
-            "Triggering a temporary Boost instead to heat zone %d to target.",
-            self._zone_id
-        )
-        duration = self._get_zone_boost_duration()
-        success = await self.coordinator.api.set_boost(self._zone_id, duration)
-        if success:
+        try:
+            success = await self.coordinator.api.set_temperature(self._zone_id, temperature)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        if not success:
+            raise HomeAssistantError(
+                f"Climote rejected {temperature} C for zone {self._zone_id}"
+            )
+
+        # The portal's delivery report never completes, so confirm by asking the hub (SMS round trip).
+        try:
             await self.coordinator.async_force_gsm_refresh()
+        except Exception as err:  # the command was accepted; do not fail the call on a slow hub
+            LOGGER.warning("Could not read back zone %d after setting %s C: %s", self._zone_id, temperature, err)
+            return
+        if self.target_temperature != round(float(temperature) * 2) / 2:
+            LOGGER.warning(
+                "Zone %d reads %s C after setting %s C; the hub may not have applied it yet",
+                self._zone_id, self.target_temperature, temperature,
+            )

@@ -4,7 +4,11 @@ Live integration test for the Climote API.
 Tests login with Email + Device ID and validates all key API flows.
 
 Usage:
-  CLIMOTE_EMAIL="your@email.com" CLIMOTE_DEVICE_ID="<your_device_id>" python3 tests/live_test.py
+  Put CLIMOTE_EMAIL, CLIMOTE_DEVICE_ID and (if needed) CLIMOTE_PIN in a gitignored `.env`
+  file in the repo root (KEY=value per line), or export them, then:
+      python3 tests/live_test.py            # read-only checks plus set-temperature (restores it)
+      python3 tests/live_test.py --boost    # also run the boost on/off tests (off by default)
+  Set CLIMOTE_TEST_ZONE (default 1) to pick the zone for set-temperature.
 """
 import asyncio
 import json
@@ -12,6 +16,21 @@ import os
 import sys
 import logging
 from unittest.mock import MagicMock
+
+def _load_dotenv():
+    path = os.path.join(os.path.dirname(__file__), "..", ".env")
+    if not os.path.exists(path):
+        return
+    for line in open(path):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, val = line.partition("=")
+            os.environ.setdefault(key.strip(), val.strip().strip("\"'"))
+
+
+_load_dotenv()
+RUN_BOOST = "--boost" in sys.argv
+ZONE = int(os.environ.get("CLIMOTE_TEST_ZONE", "1"))
 
 EMAIL = os.environ.get("CLIMOTE_EMAIL", "")
 DEVICE_ID = os.environ.get("CLIMOTE_DEVICE_ID", "")
@@ -133,57 +152,92 @@ async def run():
         except Exception as e:
             fail(f"GSM status failed: {e}")
 
-        # ── 6. Boost ON zone 1 for 30 min ──────────────────────────────────
-        section(f"TEST 6: Boost ON — {api.zone_labels.get(1,'Zone 1')} (30 min)")
-        warn("Turning ON boost for zone 1...")
+        # ── 6. Set temperature (restores the original setpoint) ────────────
+        section(f"TEST 6: Set temperature — zone {ZONE}")
         try:
-            result = await api.set_boost(zone_id=1, duration_hours=0.5)
-            if result:
-                ok("Boost ON delivered to GSM hub!")
+            print(f"   zones on the portal's temperature form: {await api.temperature_form_zones()}")
+            before = (await api.get_status(force_gsm=True)).get(f"zone{ZONE}", {})
+            orig = float(before.get("thermostat") or 0)
+            print(f"   raw zone{ZONE} before: {before}")
+            if orig < 5:
+                warn("No valid setpoint to restore; skipping")
             else:
-                fail("Boost ON timed out — hub may be slow or offline")
+                target = orig + 0.5 if orig + 0.5 <= 32 else orig - 0.5
+                if await api.set_temperature(ZONE, target):
+                    ok(f"POST accepted for {target}")
+                else:
+                    fail("Set temperature POST rejected")
+                after = {}
+                for i in range(1, 7):  # the delivery report never completes, so poll the hub
+                    await asyncio.sleep(10)
+                    after = (await api.get_status(force_gsm=True)).get(f"zone{ZONE}", {})
+                    print(f"   try {i}: thermostat={after.get('thermostat')}  raw={after}")
+                    if float(after.get("thermostat") or 0) == target:
+                        break
+                if float(after.get("thermostat") or 0) == target:
+                    ok(f"Hub reports setpoint {target}")
+                else:
+                    fail(f"Hub still reports {after.get('thermostat')} after setting {target}")
+                await api.set_temperature(ZONE, orig)
+                restored = (await api.get_status(force_gsm=True)).get(f"zone{ZONE}", {})
+                print(f"   restored to {orig}: hub says {restored.get('thermostat')}")
         except Exception as e:
-            fail(f"Boost ON exception: {e}")
+            fail(f"Set temperature exception: {e}")
 
-        # ── 7. Verify boost active ─────────────────────────────────────────
-        section("TEST 7: Verify Boost Active via GSM Status")
-        try:
-            check = await api.get_status(force_gsm=True)
-            z1 = check.get("zone1", {})
-            if z1.get("status") == "5":
-                ok(f"Boost CONFIRMED ACTIVE! timeRemaining={z1.get('timeRemaining')} min")
-            else:
-                warn(f"Zone 1 status={z1.get('status')} (may still be propagating)")
-        except Exception as e:
-            fail(f"Post-boost check failed: {e}")
+        if not RUN_BOOST:
+            warn("Skipping boost tests (pass --boost to run them)")
+        else:
+            # ── 6. Boost ON zone 1 for 30 min ──────────────────────────────────
+            section(f"TEST 7: Boost ON — {api.zone_labels.get(1,'Zone 1')} (30 min)")
+            warn("Turning ON boost for zone 1...")
+            try:
+                result = await api.set_boost(zone_id=1, duration_hours=0.5)
+                if result:
+                    ok("Boost ON delivered to GSM hub!")
+                else:
+                    fail("Boost ON timed out — hub may be slow or offline")
+            except Exception as e:
+                fail(f"Boost ON exception: {e}")
 
-        # ── wait a moment before cancel ────────────────────────────────────
-        warn("Waiting 5s before cancelling boost...")
-        await asyncio.sleep(5)
+            # ── 7. Verify boost active ─────────────────────────────────────────
+            section("TEST 7: Verify Boost Active via GSM Status")
+            try:
+                check = await api.get_status(force_gsm=True)
+                z1 = check.get("zone1", {})
+                if z1.get("status") == "5":
+                    ok(f"Boost CONFIRMED ACTIVE! timeRemaining={z1.get('timeRemaining')} min")
+                else:
+                    warn(f"Zone 1 status={z1.get('status')} (may still be propagating)")
+            except Exception as e:
+                fail(f"Post-boost check failed: {e}")
 
-        # ── 8. Boost OFF zone 1 ────────────────────────────────────────────
-        section(f"TEST 8: Boost OFF — {api.zone_labels.get(1,'Zone 1')}")
-        warn("Cancelling boost for zone 1...")
-        try:
-            result = await api.cancel_boost(zone_id=1)
-            if result:
-                ok("Boost OFF delivered to GSM hub!")
-            else:
-                fail("Boost OFF timed out")
-        except Exception as e:
-            fail(f"Boost OFF exception: {e}")
+            # ── wait a moment before cancel ────────────────────────────────────
+            warn("Waiting 5s before cancelling boost...")
+            await asyncio.sleep(5)
 
-        # ── 9. Verify cancelled ────────────────────────────────────────────
-        section("TEST 9: Verify Boost Cancelled via GSM Status")
-        try:
-            final = await api.get_status(force_gsm=True)
-            z1 = final.get("zone1", {})
-            if z1.get("status") != "5" and not z1.get("timeRemaining"):
-                ok(f"Boost CONFIRMED CANCELLED. status={z1.get('status')}")
-            else:
-                warn(f"Zone 1: status={z1.get('status')}, remaining={z1.get('timeRemaining')}min — may still propagating")
-        except Exception as e:
-            fail(f"Post-cancel check failed: {e}")
+            # ── 8. Boost OFF zone 1 ────────────────────────────────────────────
+            section(f"TEST 8: Boost OFF — {api.zone_labels.get(1,'Zone 1')}")
+            warn("Cancelling boost for zone 1...")
+            try:
+                result = await api.cancel_boost(zone_id=1)
+                if result:
+                    ok("Boost OFF delivered to GSM hub!")
+                else:
+                    fail("Boost OFF timed out")
+            except Exception as e:
+                fail(f"Boost OFF exception: {e}")
+
+            # ── 9. Verify cancelled ────────────────────────────────────────────
+            section("TEST 9: Verify Boost Cancelled via GSM Status")
+            try:
+                final = await api.get_status(force_gsm=True)
+                z1 = final.get("zone1", {})
+                if z1.get("status") != "5" and not z1.get("timeRemaining"):
+                    ok(f"Boost CONFIRMED CANCELLED. status={z1.get('status')}")
+                else:
+                    warn(f"Zone 1: status={z1.get('status')}, remaining={z1.get('timeRemaining')}min — may still propagating")
+            except Exception as e:
+                fail(f"Post-cancel check failed: {e}")
 
     # ── Summary ────────────────────────────────────────────────────────────
     print(f"\n{'═'*60}")

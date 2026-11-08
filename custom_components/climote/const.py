@@ -11,6 +11,7 @@ PATH_INDEX = "/manager/index"
 PATH_STATUS = "/manager/get-status"
 PATH_WAIT_STATUS = "/manager/waiting-get-status-response"
 PATH_BOOST = "/manager/boost"
+PATH_TEMPERATURE = "/manager/temperature"
 PATH_DELIVERY_REPORT = "/manager/wait-for-delivery-report"
 PATH_SCHEDULE = "/manager/get-heating-schedule"
 

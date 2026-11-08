@@ -13,9 +13,20 @@ from .const import (
     PATH_STATUS,
     PATH_WAIT_STATUS,
     PATH_BOOST,
+    PATH_TEMPERATURE,
     PATH_DELIVERY_REPORT,
     PATH_SCHEDULE,
 )
+
+# Allowed setpoints per zone: room thermostats, and zone 3 (hot water) which runs far hotter.
+ROOM_TEMP_LIMITS = (5.0, 32.0)
+WATER_TEMP_LIMITS = (5.0, 70.0)
+WATER_ZONE = 3
+
+
+def temp_limits(zone_id: int) -> tuple[float, float]:
+    """Return (min, max) setpoint for a zone."""
+    return WATER_TEMP_LIMITS if zone_id == WATER_ZONE else ROOM_TEMP_LIMITS
 
 class ClimoteConnectionError(Exception):
     """Exception raised when connection to Climote fails."""
@@ -62,7 +73,7 @@ class ClimoteAPI:
         url = f"{BASE_URL}{path}"
         req_headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-            "X-Requested-With": "XMLHttpRequest" if method == "GET" and ("get-status" in path or "waiting" in path) else None
+            "X-Requested-With": "XMLHttpRequest" if method == "GET" and ("get-status" in path or "waiting" in path or "delivery-report" in path) else None
         }
         if headers:
             req_headers.update(headers)
@@ -334,27 +345,78 @@ class ClimoteAPI:
         # Fallback: get cached status without forcing GSM
         return await self.get_status(force_gsm=False)
 
-    async def _send_boost_payload(self, payload: dict) -> None:
-        """Internal: POST a boost payload, retrying once after re-auth on failure."""
+    async def _send_form(self, path: str, payload: dict) -> None:
+        """Internal: POST a form payload, retrying once after re-auth on failure."""
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
         try:
-            await self._request(
-                "POST",
-                PATH_BOOST,
-                data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
+            await self._request("POST", path, data=payload, headers=headers)
         except ClimoteConnectionError:
-            # Session may have expired — re-login and rebuild CSRF in payload
-            LOGGER.info("Boost POST failed — re-authenticating and retrying…")
+            # Session may have expired: re-login and rebuild the CSRF token in the payload
+            LOGGER.info("POST to %s failed, re-authenticating and retrying", path)
             self._csrf_token = None
             await self.login()
             payload["cs_token_rf"] = self._csrf_token
-            await self._request(
-                "POST",
-                PATH_BOOST,
-                data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
+            await self._request("POST", path, data=payload, headers=headers)
+
+    async def _send_boost_payload(self, payload: dict) -> None:
+        """Internal: POST a boost payload, retrying once after re-auth on failure."""
+        await self._send_form(PATH_BOOST, payload)
+
+    async def temperature_form_zones(self) -> tuple[int, ...]:
+        """Return the zones the portal's temperature form has a field for.
+
+        Read from the page itself (inputs named temp-set-input[N]) because it depends on the
+        installation: one account's form lists zones 1 and 3 only. Falls back to all three
+        zones if the page cannot be read or lists none.
+        """
+        try:
+            html = await self._request("GET", PATH_TEMPERATURE)
+            zones = sorted({int(n) for n in re.findall(r"temp-set-input\[(\d+)\]", html)})
+            if zones:
+                return tuple(zones)
+            LOGGER.warning("No temp-set-input fields found on the temperature page")
+        except ClimoteConnectionError as err:
+            LOGGER.warning("Could not read the temperature page: %s", err)
+        return (1, 2, 3)
+
+    async def set_temperature(self, zone_id: int, temperature: float) -> bool:
+        """Set a zone's target temperature (POST accepted; delivery is not awaited).
+
+        Sends the portal's own form (POST /manager/temperature): the target zone gets the value,
+        every other zone the form lists gets "nochange". The temperature is validated against the
+        zone's limits and rounded to 0.5 C.
+        """
+        low, high = temp_limits(zone_id)
+        if not low <= float(temperature) <= high:
+            raise ValueError(f"Temperature {temperature} outside {low}-{high} for zone {zone_id}")
+
+        if not self._csrf_token:
+            await self.login()
+
+        form_zones = await self.temperature_form_zones()
+        if zone_id not in form_zones:
+            raise ValueError(f"Zone {zone_id} is not on the portal's temperature form {form_zones}")
+
+        value = round(float(temperature) * 2) / 2
+        LOGGER.info("Setting zone %d target temperature to %s", zone_id, value)
+
+        payload = {
+            f"temp-set-input[{i}]": value if i == zone_id else "nochange"
+            for i in form_zones
+        }
+        payload["do"] = "Set"
+        payload["cs_token_rf"] = self._csrf_token
+
+        try:
+            await self._send_form(PATH_TEMPERATURE, payload)
+        except Exception as err:
+            LOGGER.error("Failed to POST temperature command: %s", err)
+            return False
+
+        # No delivery wait: on this portal the delivery-report poll returns an empty body and the
+        # "Complete" step never turns green, even though the setpoint changes. The caller confirms
+        # by reading the setpoint back from the hub instead.
+        return True
 
     async def set_boost(self, zone_id: int, duration_hours: float) -> bool:
         """Trigger boost for a specific zone and wait for delivery confirmation."""

@@ -1,0 +1,22 @@
+[project]
+name = "ha-climote"
+version = "0.0.0"  # not published; the integration version lives in custom_components/climote/manifest.json
+description = "Climote heating integration for Home Assistant (dev and test setup)"
+requires-python = ">=3.12"
+# Keep in step with "requirements" in custom_components/climote/manifest.json.
+dependencies = ["xmltodict>=0.13.0"]
+
+[dependency-groups]
+dev = [
+    "aiohttp",
+    "async_timeout",
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.uv]
+package = false  # nothing to build or install; this file only describes the dev environment
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
