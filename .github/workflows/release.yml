@@ -1,0 +1,39 @@
+name: Release
+
+# On every merge to main: bump the manifest's patch version (unless the PR already changed it), commit that
+# to main, tag it and publish a release. Pin HA to the tagged commit: it is the one that carries the new
+# version. The bump commit is pushed with GITHUB_TOKEN, so it does not trigger this workflow again.
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: write
+
+concurrency: release
+
+jobs:
+  release:
+    name: bump, tag, release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # the previous main commit is needed for the comparison
+      - name: Bump the version
+        id: bump
+        run: python3 .github/scripts/bump_version.py | tee /dev/stderr | grep '^VERSION=' >> "$GITHUB_OUTPUT"
+      - name: Commit, tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.bump.outputs.VERSION }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git commit -am "Bump version to ${VERSION}"
+            git push origin HEAD:main
+          fi
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+          gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes

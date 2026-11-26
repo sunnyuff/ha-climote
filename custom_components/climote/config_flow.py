@@ -13,6 +13,7 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectOptionDict,
+    TimeSelector,
 )
 import homeassistant.helpers.config_validation as cv
 
@@ -27,6 +28,9 @@ from .const import (
     DEFAULT_POLL_INTERVAL,
     DEFAULT_BOOST_DURATION,
     MIN_POLL_INTERVAL,
+    CONF_SLEEP_START,
+    CONF_SLEEP_END,
+    DEFAULT_SLEEP_TIME,
 )
 from .api import ClimoteAPI, ClimoteAuthError, ClimoteConnectionError
 
@@ -162,15 +166,15 @@ class ClimoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry):
         """Get the options flow for this integration."""
-        return ClimoteOptionsFlowHandler(config_entry)
+        return ClimoteOptionsFlowHandler()
 
 
 class ClimoteOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for Climote Heating."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
+    # No __init__: current HA gives the flow a read-only `config_entry` property, so assigning
+    # self.config_entry (as older code did) raises AttributeError and the Configure dialog shows
+    # "Config flow could not be loaded: 500".
 
     async def async_step_init(self, user_input=None):
         """Manage the Climote options."""
@@ -208,6 +212,14 @@ class ClimoteOptionsFlowHandler(config_entries.OptionsFlow):
                             mode="list",
                         )
                     ),
+                    vol.Optional(
+                        CONF_SLEEP_START,
+                        default=self.config_entry.options.get(CONF_SLEEP_START, DEFAULT_SLEEP_TIME),
+                    ): TimeSelector(),
+                    vol.Optional(
+                        CONF_SLEEP_END,
+                        default=self.config_entry.options.get(CONF_SLEEP_END, DEFAULT_SLEEP_TIME),
+                    ): TimeSelector(),
                 }
             ),
         )

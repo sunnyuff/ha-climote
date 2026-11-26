@@ -1,11 +1,11 @@
 {
   "domain": "climote",
   "name": "Climote Heating",
-  "codeowners": ["@sunnyuff"],
+  "codeowners": ["@cormac85"],
   "config_flow": true,
-  "documentation": "https://github.com/sunnyuff/ha-climote",
+  "documentation": "https://github.com/cormac85/ha-climote",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/sunnyuff/ha-climote/issues",
+  "issue_tracker": "https://github.com/cormac85/ha-climote/issues",
   "requirements": ["xmltodict>=0.13.0"],
-  "version": "1.2.5"
+  "version": "1.3.0"
 }

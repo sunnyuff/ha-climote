@@ -1,7 +1,7 @@
 from typing import Any
 from datetime import datetime, timezone
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass, SensorDeviceClass
+from homeassistant.components.sensor import RestoreSensor, SensorEntity, SensorStateClass, SensorDeviceClass
 from homeassistant.const import UnitOfTemperature, UnitOfTime, EntityCategory
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -26,6 +26,7 @@ async def async_setup_entry(
 
     # Add a single diagnostic sensor for last successful poll
     entities.append(ClimoteLastUpdatedSensor(coordinator, entry))
+    entities.append(ClimoteLastHubReplySensor(coordinator, entry))
 
     async_add_entities(entities)
 
@@ -59,7 +60,7 @@ class ClimoteSensorBase(CoordinatorEntity[ClimoteDataUpdateCoordinator], SensorE
     def _zone_data(self) -> dict[str, Any]:
         """Helper to get current status data for this specific zone."""
         key = f"zone{self._zone_id}"
-        return self.coordinator.data.get(key, {})
+        return (self.coordinator.data or {}).get(key, {})
 
 class ClimoteTemperatureSensor(ClimoteSensorBase):
     """Sensor reporting the current temperature inside a Climote Zone."""
@@ -156,3 +157,44 @@ class ClimoteLastUpdatedSensor(CoordinatorEntity[ClimoteDataUpdateCoordinator], 
         if self.coordinator.last_update_success:
             return self.coordinator.last_update_success_time
         return None
+
+
+class ClimoteLastHubReplySensor(CoordinatorEntity[ClimoteDataUpdateCoordinator], RestoreSensor):
+    """When the hub itself last answered a status read.
+
+    Unlike "Last Updated", this does not move when the portal only returns its cached copy.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Last Hub Reply"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:message-check-outline"
+
+    def __init__(self, coordinator: ClimoteDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._restored = None
+        email = entry.title.lower()
+        self._attr_unique_id = f"{email}_last_hub_reply"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, email)},
+            "name": f"Climote Heating ({entry.title})",
+            "manufacturer": "Climote",
+            "model": "Climote GSM Hub",
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Keep the time from before a restart until the hub answers again."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_sensor_data()
+        if last is not None:
+            self._restored = last.native_value
+
+    @property
+    def available(self) -> bool:
+        """The time stays true when polls fail."""
+        return True
+
+    @property
+    def native_value(self) -> datetime | None:
+        return self.coordinator.api.health.last_reply or self._restored

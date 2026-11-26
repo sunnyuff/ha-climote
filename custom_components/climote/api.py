@@ -4,6 +4,7 @@ import re
 import aiohttp
 import xmltodict
 
+from .hub_health import HubHealth
 from .const import (
     BASE_URL,
     LOGGER,
@@ -13,13 +14,31 @@ from .const import (
     PATH_STATUS,
     PATH_WAIT_STATUS,
     PATH_BOOST,
-    PATH_DELIVERY_REPORT,
+    PATH_TEMPERATURE,
     PATH_SCHEDULE,
 )
+
+# Allowed setpoints per zone: room thermostats, and zone 3 (hot water) which runs far hotter.
+ROOM_TEMP_LIMITS = (5.0, 32.0)
+WATER_TEMP_LIMITS = (5.0, 70.0)
+WATER_ZONE = 3
+
+
+def temp_limits(zone_id: int) -> tuple[float, float]:
+    """Return (min, max) setpoint for a zone."""
+    return WATER_TEMP_LIMITS if zone_id == WATER_ZONE else ROOM_TEMP_LIMITS
 
 class ClimoteConnectionError(Exception):
     """Exception raised when connection to Climote fails."""
     pass
+
+class ClimoteHubTimeout(Exception):
+    """The hub did not answer a status request in time.
+
+    Deliberately not a ClimoteConnectionError: get_status retries those after a fresh login, which
+    would start another SMS and another 90 s poll.
+    """
+
 
 class ClimoteAuthError(Exception):
     """Exception raised when authentication fails."""
@@ -42,6 +61,9 @@ class ClimoteAPI:
         self._pin = pin.strip()
         self._csrf_token = None
         self._schedule_id = None
+        self.gsm_reads = 0  # hub round trips since HA started, for the log line in _fetch_status
+        self.last_read_stale = False  # True when the hub was silent and the portal's cache was returned
+        self.health = HubHealth()  # is the hub answering reads?
         self.zone_labels = {1: "Zone 1", 2: "Zone 2", 3: "Zone 3"}
 
     @property
@@ -62,7 +84,7 @@ class ClimoteAPI:
         url = f"{BASE_URL}{path}"
         req_headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-            "X-Requested-With": "XMLHttpRequest" if method == "GET" and ("get-status" in path or "waiting" in path) else None
+            "X-Requested-With": "XMLHttpRequest" if method == "GET" and ("get-status" in path or "waiting" in path or "delivery-report" in path) else None
         }
         if headers:
             req_headers.update(headers)
@@ -241,6 +263,7 @@ class ClimoteAPI:
         stuck after a session timeout.
         """
         LOGGER.debug("Fetching Climote status (force_gsm=%s)", force_gsm)
+        self.last_read_stale = False
 
         # Ensure we are logged in by checking CSRF token
         if not self._csrf_token:
@@ -259,7 +282,7 @@ class ClimoteAPI:
             await self.login()
             return await self._fetch_status(force_gsm)
 
-    async def _fetch_status(self, force_gsm: bool = False) -> dict:
+    async def _fetch_status(self, force_gsm: bool = False, poll_if_awaiting: bool = True) -> dict:
         """Internal: fetch zone status (single attempt, no retry)."""
         force_val = "1" if force_gsm else "0"
         try:
@@ -289,7 +312,16 @@ class ClimoteAPI:
                 except Exception:
                     status_data = clean_res
             else:
-                status_data = json.loads(clean_res)
+                try:
+                    status_data = json.loads(clean_res)
+                except ValueError as err:
+                    # Usually the login page, served in place of the status once the session has
+                    # expired. get_status re-authenticates and retries; the snippet (first 80 characters,
+                    # never the whole page) shows what the portal sent if the retry fails too.
+                    snippet = " ".join(clean_res.split())[:80]
+                    raise ClimoteConnectionError(
+                        f"Status reply is not JSON ({len(clean_res)} chars, starts {snippet!r})"
+                    ) from err
         except ClimoteConnectionError:
             raise
         except Exception as err:
@@ -298,7 +330,14 @@ class ClimoteAPI:
 
         # If we commanded a GSM force_gsm, the return value is `"awaiting response"`.
         # In this case we poll the async waiting endpoint.
-        if force_gsm or status_data == "awaiting response":
+        if force_gsm or (poll_if_awaiting and status_data == "awaiting response"):
+            # Greppable, one line per hub SMS round trip: count these to see what the allowance is spent on.
+            self.gsm_reads += 1
+            LOGGER.info(
+                "Climote GSM read #%d since start (reason: %s)",
+                self.gsm_reads,
+                "forced by caller" if force_gsm else "portal answered 'awaiting response' to a plain poll",
+            )
             LOGGER.debug("Status requires GSM fetch. Polling wait endpoint...")
             return await self._poll_gsm_status()
 
@@ -326,47 +365,119 @@ class ClimoteAPI:
                 data = json.loads(clean_res)
                 if isinstance(data, dict) and "zone1" in data:
                     LOGGER.debug("GSM update completed successfully on attempt %d", attempt)
+                    self.health.reply()
                     return data
             except Exception as err:
                 LOGGER.warning("Error during GSM poll attempt %d: %s", attempt, err)
 
-        LOGGER.error("GSM polling timed out after %d attempts. Returning cached/stale data.", max_attempts)
-        # Fallback: get cached status without forcing GSM
-        return await self.get_status(force_gsm=False)
-
-    async def _send_boost_payload(self, payload: dict) -> None:
-        """Internal: POST a boost payload, retrying once after re-auth on failure."""
-        try:
-            await self._request(
-                "POST",
-                PATH_BOOST,
-                data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
+        LOGGER.error("GSM polling timed out after %d attempts. Falling back to the cached status.", max_attempts)
+        self.health.timeout()
+        # Fallback: one cached read that never starts another poll. It used to call get_status, and
+        # when the portal answered "awaiting response" again that began another 90 s poll, and so on
+        # for as long as the hub stayed silent.
+        data = await self._fetch_status(force_gsm=False, poll_if_awaiting=False)
+        if not isinstance(data, dict) or "zone1" not in data:
+            raise ClimoteHubTimeout(
+                f"Hub did not answer within {int(max_attempts * poll_delay)} s and the portal has no cached status"
             )
+        self.last_read_stale = True
+        return data
+
+    async def _send_form(self, path: str, payload: dict) -> None:
+        """Internal: POST a form payload, retrying once after re-auth on failure."""
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        try:
+            await self._request("POST", path, data=payload, headers=headers)
         except ClimoteConnectionError:
-            # Session may have expired — re-login and rebuild CSRF in payload
-            LOGGER.info("Boost POST failed — re-authenticating and retrying…")
+            # Session may have expired: re-login and rebuild the CSRF token in the payload
+            LOGGER.info("POST to %s failed, re-authenticating and retrying", path)
             self._csrf_token = None
             await self.login()
             payload["cs_token_rf"] = self._csrf_token
-            await self._request(
-                "POST",
-                PATH_BOOST,
-                data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
+            await self._request("POST", path, data=payload, headers=headers)
 
-    async def set_boost(self, zone_id: int, duration_hours: float) -> bool:
-        """Trigger boost for a specific zone and wait for delivery confirmation."""
-        LOGGER.info("Boosting zone %d for %s hours", zone_id, duration_hours)
+    async def _send_boost_payload(self, payload: dict) -> None:
+        """Internal: POST a boost payload, retrying once after re-auth on failure."""
+        await self._send_form(PATH_BOOST, payload)
+
+    async def temperature_form_zones(self) -> tuple[int, ...]:
+        """Return the zones the portal's temperature form has a field for.
+
+        Read from the page itself (inputs named temp-set-input[N]) because it depends on the
+        installation: one account's form lists zones 1 and 3 only. Falls back to all three
+        zones if the page cannot be read or lists none.
+        """
+        try:
+            for attempt in (1, 2):
+                html = await self._request("GET", PATH_TEMPERATURE)
+                zones = sorted({int(n) for n in re.findall(r"temp-set-input\[(\d+)\]", html)})
+                if zones:
+                    return tuple(zones)
+                if attempt == 1:
+                    # An expired session gets the login page (HTTP 200) instead of the form.
+                    LOGGER.info("No temp-set-input fields on the temperature page, re-authenticating")
+                    self._csrf_token = None
+                    await self.login()
+            LOGGER.warning("No temp-set-input fields found on the temperature page")
+        except ClimoteConnectionError as err:
+            LOGGER.warning("Could not read the temperature page: %s", err)
+        return (1, 2, 3)
+
+    async def set_temperature(self, zone_id: int, temperature: float) -> bool:
+        """Set a zone's target temperature (POST accepted; delivery is not awaited).
+
+        Sends the portal's own form (POST /manager/temperature): the target zone gets the value,
+        every other zone the form lists gets "nochange". The temperature is validated against the
+        zone's limits and rounded to 0.5 C.
+        """
+        low, high = temp_limits(zone_id)
+        if not low <= float(temperature) <= high:
+            raise ValueError(f"Temperature {temperature} outside {low}-{high} for zone {zone_id}")
 
         if not self._csrf_token:
             await self.login()
 
-        # Build payload dynamically: set duration for target zone, "nochange" for others
+        form_zones = await self.temperature_form_zones()
+        if zone_id not in form_zones:
+            raise ValueError(f"Zone {zone_id} is not on the portal's temperature form {form_zones}")
+
+        value = round(float(temperature) * 2) / 2
+        LOGGER.info("Climote GSM command: set zone %d to %s (costs one SMS)", zone_id, value)
+
+        payload = {
+            f"temp-set-input[{i}]": value if i == zone_id else "nochange"
+            for i in form_zones
+        }
+        payload["do"] = "Set"
+        payload["cs_token_rf"] = self._csrf_token
+
+        try:
+            await self._send_form(PATH_TEMPERATURE, payload)
+        except Exception as err:
+            LOGGER.error("Failed to POST temperature command: %s", err)
+            return False
+
+        # No delivery wait: on this portal the delivery-report poll returns an empty body and the
+        # "Complete" step never turns green, even though the setpoint changes. The caller confirms
+        # by reading the setpoint back from the hub instead.
+        return True
+
+    async def set_boost(self, zone_id: int, duration_hours: float) -> bool:
+        """Trigger boost for a specific zone (one POST; the caller reads the status back)."""
+        LOGGER.info("Climote GSM command: boost zone %d for %s hours (costs one SMS)", zone_id, duration_hours)
+
+        if not self._csrf_token:
+            await self.login()
+
+        # Only the zones the portal's own form has (zones 1 and 3 here; the browser sends no
+        # zoneIds[2]), "nochange" for every zone but the one being boosted.
+        form_zones = await self.temperature_form_zones()
+        if zone_id not in form_zones:
+            LOGGER.error("Zone %d is not on the portal's form %s, so it cannot be boosted", zone_id, form_zones)
+            return False
         payload = {
             f"zoneIds[{i}]": duration_hours if i == zone_id else "nochange"
-            for i in range(1, 4)
+            for i in form_zones
         }
         payload["cs_token_rf"] = self._csrf_token
 
@@ -376,20 +487,26 @@ class ClimoteAPI:
             LOGGER.error("Failed to POST boost command: %s", err)
             return False
 
-        # Wait for delivery report
-        return await self._wait_for_delivery()
+        # No delivery wait, same as set_temperature: on this portal the delivery report never says
+        # DELIVERED, so waiting 90 s always ended in False and the caller skipped its status refresh,
+        # leaving the boost switch showing Off. The caller confirms by reading the hub's status.
+        return True
 
     async def cancel_boost(self, zone_id: int) -> bool:
         """Send stop boost command for a specific zone."""
-        LOGGER.info("Cancelling boost for zone %d", zone_id)
+        LOGGER.info("Climote GSM command: cancel boost on zone %d (costs one SMS)", zone_id)
 
         if not self._csrf_token:
             await self.login()
 
-        # Build payload: "stop" for target zone, "nochange" for others
+        # Same zones as the portal's form (see set_boost): "stop" for the target, "nochange" for the rest.
+        form_zones = await self.temperature_form_zones()
+        if zone_id not in form_zones:
+            LOGGER.error("Zone %d is not on the portal's form %s, so its boost cannot be cancelled", zone_id, form_zones)
+            return False
         payload = {
             f"zoneIds[{i}]": "stop" if i == zone_id else "nochange"
-            for i in range(1, 4)
+            for i in form_zones
         }
         payload["cs_token_rf"] = self._csrf_token
 
@@ -399,35 +516,5 @@ class ClimoteAPI:
             LOGGER.error("Failed to POST stop boost command: %s", err)
             return False
 
-        # Wait for delivery report
-        return await self._wait_for_delivery()
-
-    async def _wait_for_delivery(self) -> bool:
-        """Poll wait-for-delivery-report until DELIVERED/OK is returned.
-        
-        Max wait: 30 attempts × 3s = 90 seconds. Accounts for weak GSM signal.
-        """
-        max_attempts = 30
-        poll_delay = 3.0
-
-        for attempt in range(1, max_attempts + 1):
-            await asyncio.sleep(poll_delay)
-            try:
-                res = await self._request("GET", PATH_DELIVERY_REPORT)
-                status = res.strip().upper()
-                LOGGER.debug("Delivery status: %s (attempt %d/%d)", status, attempt, max_attempts)
-                
-                # Real API returns "DELIVERED" when command reaches the hub.
-                # "OK" kept as a fallback in case the response ever changes.
-                if status in ("OK", "DELIVERED"):
-                    LOGGER.debug("Command delivered successfully to GSM hub (status=%s)", status)
-                    return True
-                elif status == "PENDING":
-                    continue
-                else:
-                    LOGGER.warning("Unexpected delivery status: %s (attempt %d/%d)", status, attempt, max_attempts)
-            except Exception as err:
-                LOGGER.warning("Error waiting for delivery report on attempt %d: %s", attempt, err)
-
-        LOGGER.error("Command delivery report timed out after %d attempts", max_attempts)
-        return False
+        # No delivery wait (see set_boost).
+        return True

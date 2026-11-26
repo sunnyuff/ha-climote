@@ -1,10 +1,12 @@
 # ha-climote — Climote Heating for Home Assistant
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![GitHub release](https://img.shields.io/github/release/sunnyuff/ha-climote.svg)](https://github.com/sunnyuff/ha-climote/releases)
+[![GitHub release](https://img.shields.io/github/release/cormac85/ha-climote.svg)](https://github.com/cormac85/ha-climote/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A modern, fully-async Home Assistant custom integration for the **Climote GSM Home Heating Controller** — reverse-engineered from the official Climote web portal at `climote.climote.ie`.
+
+> **Independent fork.** Started from [sunnyuff/ha-climote](https://github.com/sunnyuff/ha-climote) 1.2.5 (MIT), now maintained separately. The main difference: `climate.set_temperature` sets the zone's real target temperature through the portal's own form (upstream starts a boost and ignores the value). Versions here start at 1.3.0.
 
 > **Live Tested** — Every API flow (login, status, boost on/off) verified against a real Climote GSM hub. 9/9 tests pass.
 
@@ -33,7 +35,7 @@ A modern, fully-async Home Assistant custom integration for the **Climote GSM Ho
 
 1. Open **HACS** in Home Assistant
 2. Click **Integrations** → top-right **⋮ menu** → **Custom repositories**
-3. Add: `https://github.com/sunnyuff/ha-climote` with category **Integration**
+3. Add: `https://github.com/cormac85/ha-climote` with category **Integration**
 4. Find **Climote Heating** and click **Install**
 5. Restart Home Assistant
 
@@ -74,6 +76,7 @@ After setup, click **Configure** on the integration to adjust:
 |---|---|---|
 | **Polling Interval** | 1800s (30 min) | How often to refresh cached cloud status |
 | **Default Boost Duration** | 1 hour | Duration used when toggling boost via switch/climate |
+| **Sleep period start / end** | off (both 00:00) | No scheduled polls in this daily window, to save SMS. Boosts and automated temperature changes get no confirmation read either; a temperature changed by a person still does. One read when it ends. HA starting with no data still reads once |
 
 > ⚠️ **Do not set polling below 1800s (30 min).** Climote uses GSM/SMS to communicate with the hub. Excessive polling will exhaust your SMS credit.
 
@@ -95,6 +98,11 @@ Entities (per zone: Living, Bed, Water)
 ├── climate.climote_living         ← HVAC card, set mode = boost on/off
 ├── switch.climote_living_boost    ← simple on/off toggle
 └── sensor.climote_living_*        ← temperature + boost time remaining
+
+Hub health
+├── sensor "Last Hub Reply"            ← when the hub itself last answered a read
+└── binary_sensor "Hub Not Answering"  ← on after 3 unanswered reads in a row; test reads
+                                          are then at least 6 h apart until one is answered
 ```
 
 ---
@@ -192,4 +200,4 @@ PRs welcome! Please open an issue first for major changes.
 
 ## 📄 License
 
-[MIT](LICENSE) © 2026 Sunny Jhunjhunwala
+[MIT](LICENSE) © 2026 Sunny Jhunjhunwala (original), © 2026 cormac85 (changes in this fork)

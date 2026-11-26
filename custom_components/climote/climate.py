@@ -9,10 +9,12 @@ from homeassistant.components.climate import (
 from homeassistant.const import UnitOfTemperature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, LOGGER, DEFAULT_BOOST_DURATION
+from .api import temp_limits
 from .coordinator import ClimoteDataUpdateCoordinator
 
 async def async_setup_entry(
@@ -35,7 +37,7 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
     """Representation of a Climote Heating Zone as a Climate Entity."""
 
     _attr_has_entity_name = True
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
 
     def __init__(
@@ -66,11 +68,14 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
     def _zone_data(self) -> dict[str, Any]:
         """Helper to get current status data for this specific zone."""
         key = f"zone{self._zone_id}"
-        return self.coordinator.data.get(key, {})
+        return (self.coordinator.data or {}).get(key, {})
 
     @property
-    def target_temperature(self) -> float | None:
+    def native_target_temperature(self) -> float | None:
         """Return the target temperature (thermostat setting)."""
+        expected = self.coordinator.expected_setpoint(self._zone_id)
+        if expected is not None:
+            return expected
         try:
             thermostat = self._zone_data.get("thermostat")
             # Zones without a physical sensor report "00" or 0 — treat as unknown
@@ -81,7 +86,7 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
         return None
 
     @property
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
         """Return the current temperature inside the zone."""
         try:
             temp = self._zone_data.get("temperature")
@@ -98,7 +103,10 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
         # status "5" = Boost is active
         # status "1" = Schedule/timer is running (heating)
         # status None or "0" = idle / off
-        status = self._zone_data.get("status")
+        expected = self.coordinator.expected_boost(self._zone_id)
+        if expected is not None:
+            return HVACMode.HEAT if expected else HVACMode.OFF
+        status = str(self._zone_data.get("status"))
         if status in ("5", "1"):
             return HVACMode.HEAT
         return HVACMode.OFF
@@ -111,7 +119,10 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
     @property
     def hvac_action(self) -> HVACAction | None:
         """Return the current HVAC action (HEATING or IDLE)."""
-        status = self._zone_data.get("status")
+        expected = self.coordinator.expected_boost(self._zone_id)
+        if expected is not None:
+            return HVACAction.HEATING if expected else HVACAction.IDLE
+        status = str(self._zone_data.get("status"))
         # "5" = Boost, "1" = Schedule-driven heat
         if status in ("5", "1"):
             return HVACAction.HEATING
@@ -120,12 +131,12 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
     @property
     def min_temp(self) -> float:
         """Return the minimum temperature."""
-        return 5.0
+        return temp_limits(self._zone_id)[0]
 
     @property
     def max_temp(self) -> float:
         """Return the maximum temperature."""
-        return 32.0
+        return temp_limits(self._zone_id)[1]
 
     @property
     def target_temperature_step(self) -> float:
@@ -144,25 +155,36 @@ class ClimoteZoneClimate(CoordinatorEntity[ClimoteDataUpdateCoordinator], Climat
             LOGGER.info("Setting HVAC Mode to HEAT for zone %d (boosting %s hours)", self._zone_id, duration)
             success = await self.coordinator.api.set_boost(self._zone_id, duration)
             if success:
-                await self.coordinator.async_force_gsm_refresh()
+                self.coordinator.expect_boost(self._zone_id, True, float(duration))
+                self.coordinator.schedule_confirmation()
+            else:
+                raise HomeAssistantError(f"Climote did not accept the boost command for zone {self._zone_id} (see the log)")
         elif hvac_mode == HVACMode.OFF:
             LOGGER.info("Setting HVAC Mode to OFF for zone %d (cancelling boost)", self._zone_id)
             success = await self.coordinator.api.cancel_boost(self._zone_id)
             if success:
-                await self.coordinator.async_force_gsm_refresh()
+                self.coordinator.expect_boost(self._zone_id, False)
+                self.coordinator.schedule_confirmation()
+            else:
+                raise HomeAssistantError(f"Climote did not accept the cancel command for zone {self._zone_id} (see the log)")
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set target temperature. Climote schedules are template-based, so setting temperature triggers a boost."""
+        """Set the zone's target temperature through the portal's temperature form."""
         temperature = kwargs.get("temperature")
         if temperature is None:
             return
 
-        LOGGER.warning(
-            "Setting arbitrary target temperature directly on Climote is template-bound. "
-            "Triggering a temporary Boost instead to heat zone %d to target.",
-            self._zone_id
-        )
-        duration = self._get_zone_boost_duration()
-        success = await self.coordinator.api.set_boost(self._zone_id, duration)
-        if success:
-            await self.coordinator.async_force_gsm_refresh()
+        try:
+            success = await self.coordinator.api.set_temperature(self._zone_id, temperature)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        if not success:
+            raise HomeAssistantError(
+                f"Climote rejected {temperature} C for zone {self._zone_id}"
+            )
+
+        # The portal's delivery report never completes, and an immediate read returns the old value.
+        # Show the requested temperature and let one later read confirm it.
+        # HA sets a user id on actions from the UI or app, and none on automation runs.
+        by_person = self._context is not None and self._context.user_id is not None
+        self.coordinator.expect_setpoint(self._zone_id, round(float(temperature) * 2) / 2, by_person)
